@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Body Fat Predictions</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans">
+    
+    <div id="image-modal" class="fixed inset-0 bg-black bg-opacity-75 z-50 hidden flex justify-center items-center p-4">
+        <div class="bg-white rounded-lg p-6 max-w-4xl w-full relative">
+            <button onclick="closeModal()" class="absolute top-4 right-4 text-gray-500 hover:text-gray-800 text-2xl font-bold">&times;</button>
+            <h3 class="text-xl font-semibold mb-4 text-center">Prediction Images</h3>
+            <div id="modal-loading" class="text-center py-10">Loading images...</div>
+            <div id="modal-content" class="grid grid-cols-1 md:grid-cols-2 gap-4 hidden">
+                <div>
+                    <h4 class="text-center font-medium mb-2">Front View</h4>
+                    <img id="front-img" src="" alt="Front View" class="w-full rounded shadow-md">
+                </div>
+                <div>
+                    <h4 class="text-center font-medium mb-2">Side View</h4>
+                    <img id="side-img" src="" alt="Side View" class="w-full rounded shadow-md">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container mx-auto p-4 max-w-6xl">
+        <h1 class="text-4xl font-extrabold text-center mb-8 text-blue-600 tracking-tight">Body Fat Dashboard</h1>
+        
+        <div class="mb-8 bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+            <label for="name-select" class="block text-sm font-semibold text-gray-600 mb-2 uppercase tracking-wide">Select Profile</label>
+            <select id="name-select" class="block w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow bg-gray-50" onchange="updateDisplay()">
+                <option value="">-- Choose a name --</option>
+                {% for name in names %}
+                    <option value="{{ name }}">{{ name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div id="dashboard-content" class="hidden">
+            
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 mb-8">
+                <h2 class="text-xl font-bold mb-4 text-gray-700">Progress History</h2>
+                <div class="relative h-72 w-full">
+                    <canvas id="bodyFatChart"></canvas>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                <h2 id="table-title" class="text-xl font-bold mb-4 text-gray-700"></h2>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="bg-gray-100 text-gray-600 text-sm uppercase tracking-wider border-b-2 border-gray-200">
+                                <th class="p-4 font-semibold">Date</th>
+                                <th class="p-4 font-semibold">Height</th>
+                                <th class="p-4 font-semibold">Weight</th>
+                                <th class="p-4 font-semibold">Body Fat</th>
+                                <th class="p-4 font-semibold">Category</th>
+                                <th class="p-4 font-semibold text-center">Images</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body" class="divide-y divide-gray-100"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const predictionsByName = {{ predictions_by_name | tojson }};
+        const chartData = {{ chart_data | safe }};
+        let chart = null;
+
+        function updateDisplay() {
+            const name = document.getElementById('name-select').value;
+            const tableBody = document.getElementById('table-body');
+            const dashboardContent = document.getElementById('dashboard-content');
+            const tableTitle = document.getElementById('table-title');
+
+            tableBody.innerHTML = '';
+
+            if (!name) {
+                dashboardContent.classList.add('hidden');
+                if (chart) {
+                    chart.destroy();
+                    chart = null;
+                }
+                return;
+            }
+
+            dashboardContent.classList.remove('hidden');
+            tableTitle.textContent = `Detailed Records for ${name}`;
+            const predictions = [...(predictionsByName[name] || [])].reverse(); // Reverse for table (newest first)
+
+            predictions.forEach(p => {
+                const row = document.createElement('tr');
+                row.className = "hover:bg-gray-50 transition-colors";
+                
+                // Badge color logic
+                let badgeColor = "bg-gray-200 text-gray-800";
+                if(p.category.includes("Athletic") || p.category.includes("Fitness")) badgeColor = "bg-green-100 text-green-800";
+                if(p.category.includes("Obese")) badgeColor = "bg-red-100 text-red-800";
+                if(p.category.includes("Essential")) badgeColor = "bg-yellow-100 text-yellow-800";
+                if(p.category.includes("Average")) badgeColor = "bg-blue-100 text-blue-800";
+
+                let imgButton = '<span class="text-gray-400 text-sm italic">No images</span>';
+                if(p.has_images) {
+                    imgButton = `<button onclick="viewImages('${p.front_key}', '${p.side_key}')" class="text-blue-600 hover:text-blue-800 font-medium px-3 py-1 rounded-md hover:bg-blue-50 transition-colors">View Photos</button>`;
+                }
+
+                row.innerHTML = `
+                    <td class="p-4 text-sm whitespace-nowrap text-gray-600">${p.timestamp}</td>
+                    <td class="p-4 text-sm">${p.height_cm.toFixed(1)} cm</td>
+                    <td class="p-4 text-sm">${p.weight_kg.toFixed(1)} kg</td>
+                    <td class="p-4 font-bold text-gray-800">${p.predicted_body_fat.toFixed(1)}%</td>
+                    <td class="p-4"><span class="px-2 py-1 rounded-full text-xs font-semibold tracking-wide ${badgeColor}">${p.category}</span></td>
+                    <td class="p-4 text-center">${imgButton}</td>
+                `;
+                tableBody.appendChild(row);
+            });
+
+            // Update chart (uses chronological order from chartData)
+            if (chart) {
+                chart.destroy();
+            }
+            const ctx = document.getElementById('bodyFatChart').getContext('2d');
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: chartData[name].labels,
+                    datasets: [{
+                        label: 'Body Fat %',
+                        data: chartData[name].data,
+                        borderColor: '#2563eb', // blue-600
+                        backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                        borderWidth: 3,
+                        pointBackgroundColor: '#2563eb',
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2,
+                        pointRadius: 4,
+                        fill: true,
+                        tension: 0.3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            grid: { color: '#f3f4f6' }
+                        },
+                        x: {
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+        }
+
+        function viewImages(frontKey, sideKey) {
+            const modal = document.getElementById('image-modal');
+            const loading = document.getElementById('modal-loading');
+            const content = document.getElementById('modal-content');
+            const frontImg = document.getElementById('front-img');
+            const sideImg = document.getElementById('side-img');
+
+            modal.classList.remove('hidden');
+            loading.classList.remove('hidden');
+            content.classList.add('hidden');
+
+            fetch('/get_image_urls', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ front_key: frontKey, side_key: sideKey })
+            })
+            .then(response => response.json())
+            .then(data => {
+                loading.classList.add('hidden');
+                content.classList.remove('hidden');
+                
+                if(data.front) frontImg.src = data.front;
+                if(data.side) sideImg.src = data.side;
+            })
+            .catch(err => {
+                loading.innerHTML = "Failed to load images.";
+                console.error(err);
+            });
+        }
+
+        function closeModal() {
+            document.getElementById('image-modal').classList.add('hidden');
+            document.getElementById('front-img').src = "";
+            document.getElementById('side-img').src = "";
+        }
+    </script>
+</body>
+</html>
