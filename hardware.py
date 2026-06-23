@@ -1,4 +1,3 @@
-"""Hardware module for camera and sensor management."""
 import board
 import busio
 import RPi.GPIO as GPIO
@@ -9,7 +8,6 @@ from adafruit_ads1x15.analog_in import AnalogIn
 from picamera2 import Picamera2
 
 class CameraManager:
-    """Handles camera initialization and operations."""
     
     def __init__(self):
         self.camera = None
@@ -17,7 +15,6 @@ class CameraManager:
         self.initialize()
     
     def initialize(self):
-        """Initialize the camera."""
         try:
             self.camera = Picamera2()
             self.camera.configure(self.camera.create_still_configuration())
@@ -28,13 +25,11 @@ class CameraManager:
             self.is_initialized = False
     
     def capture_array(self):
-        """Capture a frame as numpy array."""
         if not self.is_initialized or not self.camera:
             raise RuntimeError("Camera not initialized")
         return self.camera.capture_array()
     
     def shutdown(self):
-        """Safely shutdown the camera."""
         if self.camera:
             try:
                 self.camera.stop()
