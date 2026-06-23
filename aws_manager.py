@@ -1,5 +1,3 @@
-"""AWS operations for S3 and DynamoDB."""
-
 import boto3
 from io import BytesIO
 from decimal import Decimal
@@ -7,7 +5,6 @@ from datetime import datetime
 
 
 class AWSManager:
-    """Handles S3 and DynamoDB operations."""
     
     def __init__(self, bucket_name="bodyfat-predictor-mihnea-2026", table_name="BodyFatPredictions"):
         self.bucket_name = bucket_name
@@ -49,7 +46,6 @@ class AWSManager:
     
     def save_prediction(self, prediction_id, name, sex, height_cm, weight_kg, 
                        body_fat_percent, ffm, fat_mass, category, front_image_key, side_image_key):
-        """Save prediction data to DynamoDB."""
         if not self.table:
             raise RuntimeError("DynamoDB table not initialized")
         
