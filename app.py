@@ -21,7 +21,6 @@ class BodyFatApp:
         self.root.title("Hybrid Body Fat Predictor")
         self.camera_lock = threading.Lock()
 
-        # Initialize managers
         self.camera_manager = CameraManager()
         self.sensor_manager = SensorManager()
         self.aws_manager = AWSManager()
@@ -30,10 +29,8 @@ class BodyFatApp:
         
         self.names = self.data_manager.load_names()
 
-        # UI Setup
         self._setup_ui()
 
-        # State variables
         self.captured_images = {}
         self.image_paths = {"front": None, "side": None}
         self.impedance_ohms = None
@@ -41,7 +38,6 @@ class BodyFatApp:
         self.prediction_id = None
         self.is_live_preview = True
 
-        # Temp directory for images
         self.temp_dir = "/tmp/bodyfat_predictor"
         os.makedirs(self.temp_dir, exist_ok=True)
         self.root.protocol("WM_DELETE_WINDOW", self.close_app)
@@ -190,22 +186,18 @@ class BodyFatApp:
             self.result_label.config(text="Processing AI Math...")
             self.root.update()
 
-            # Get AI prediction
             ai_bf, cat = predict_body_fat(
                 self.image_paths["front"],
                 self.image_paths["side"],
                 h, w, MODEL_PATH, NORM_PATH
             )
 
-            # Get BIA prediction (Now catching 3 variables!)
             sex = self.sex_var.get()
             ffm, fat_mass, bia_bf = self.calculator.calculate_bia_body_fat(h, w, age, self.impedance_ohms, sex)
             
-            # Combine predictions
             final_bf = self.calculator.hybrid_prediction(ai_bf, bia_bf)
             final_cat = self.calculator.get_category(final_bf, sex)
 
-            # Save 8 variables to state
             self.prediction_result = (final_bf, final_cat, name, h, w, sex, ffm, fat_mass) 
 
             result_text = (
@@ -215,7 +207,6 @@ class BodyFatApp:
             self.result_label.config(text=result_text)
             self.save_btn.config(state="normal")
             
-            # Clean up temp images
             for path in self.image_paths.values():
                 if path and os.path.exists(path):
                     os.remove(path)
@@ -232,18 +223,15 @@ class BodyFatApp:
         if not self.prediction_result:
             return
 
-        # Unpack all 8 variables
         final_bf, category, name, height, weight, sex, ffm, fat_mass = self.prediction_result
 
         try:
-            # Upload images to S3
             front_key, side_key = self.aws_manager.upload_images(
                 self.prediction_id,
                 self.captured_images["front"],
                 self.captured_images["side"]
             )
 
-            # Save prediction to DynamoDB (Passing ffm and fat_mass)
             self.aws_manager.save_prediction(
                 self.prediction_id,
                 name, sex, height, weight,
@@ -251,7 +239,6 @@ class BodyFatApp:
                 front_key, side_key
             )
 
-            # Update saved names
             self.names = self.data_manager.save_name(name, self.names)
             self.name_dropdown['values'] = self.names
 

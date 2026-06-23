@@ -5,29 +5,21 @@ class BodyFatCalculator:
     
     @staticmethod
     def calculate_bia_body_fat(height_cm, weight_kg, age, resistance_ohms, sex):
-        # Safety check to prevent dividing by zero if the sensor misreads
         if resistance_ohms <= 0:
-            resistance_ohms = 500.0  # Default average human baseline
+            resistance_ohms = 500.0
 
-        # The core metric of all medical BIA machines: The Impedance Index
         impedance_index = (height_cm ** 2) / resistance_ohms
         
-        # Calculate Fat-Free Mass (FFM) first, based on muscle conductivity
         if sex.upper().startswith("M"):
-            # Standard Male Equation
             ffm = (0.396 * impedance_index) + (0.143 * weight_kg) + 8.4
         else:
-            # Standard Female Equation
             ffm = (0.340 * impedance_index) + (0.153 * weight_kg) + 4.5
 
-        # Safety boundary (you can't have more FFM than total weight!)
         ffm = min(ffm, weight_kg * 0.95)
         
-        # Calculate Fat Mass and Percentage based on the FFM we just found
         fat_mass = weight_kg - ffm
         bodyfat_percent = (fat_mass / weight_kg) * 100
         
-        # Cap the lowest possible body fat at an essential 3%
         final_bf_percent = max(3.0, bodyfat_percent)
         
         return ffm, fat_mass, final_bf_percent

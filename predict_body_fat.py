@@ -8,16 +8,14 @@ from torchvision import transforms
 from torchvision.models import resnet50
 from torch import nn
 
-# --- COMPATIBILITY PATCH ---
 try:
     import numpy._core
 except ImportError:
     sys.modules['numpy._core'] = np.core
     sys.modules['numpy._core.multiarray'] = np.core.multiarray
 
-# ============================================================
-# STEP 1: MEDIAPIPE CROP — tightly crop person from image
-# ============================================================
+
+# STEP 1: MEDIAPIPE CROP
 def crop_to_person(image_path, padding=30):
     """
     Uses MediaPipe Pose to detect body landmarks and crop tightly
@@ -62,9 +60,7 @@ def crop_to_person(image_path, padding=30):
         return img
 
 
-# ============================================================
-# STEP 2: BACKGROUND REMOVAL — isolate body pixels only
-# ============================================================
+# STEP 2: BACKGROUND REMOVAL
 def remove_background(pil_image):
     """
     Uses rembg to strip the background, leaving only the person.
@@ -73,9 +69,7 @@ def remove_background(pil_image):
     """
     try:
         from rembg import remove
-        # rembg returns RGBA
         result_rgba = remove(pil_image)
-        # Composite onto white background
         background = Image.new("RGB", result_rgba.size, (255, 255, 255))
         background.paste(result_rgba, mask=result_rgba.split()[3])
         return background
@@ -87,20 +81,9 @@ def remove_background(pil_image):
         return pil_image.convert("RGB")
 
 
-# ============================================================
-# STEP 3: POSE MEASUREMENTS — extract body proportion features
-# ============================================================
+# STEP 3: POSE MEASUREMENTS
 def extract_pose_measurements(image_path):
-    """
-    Extracts normalized body proportion ratios from MediaPipe landmarks.
-    These are strongly correlated with body fat and supplement raw pixels.
 
-    Returns a 6-element tensor:
-        [shoulder_width, hip_width, torso_length, waist_est,
-         shoulder_hip_ratio, torso_height_ratio]
-    All values normalized to [0, 1] range.
-    Returns zeros if detection fails (graceful degradation).
-    """
     try:
         import mediapipe as mp
         img_bgr = cv2.imread(image_path)
@@ -118,7 +101,6 @@ def extract_pose_measurements(image_path):
 
         lm = results.pose_landmarks.landmark
 
-        # Key landmark indices (MediaPipe Pose)
         LEFT_SHOULDER   = 11
         RIGHT_SHOULDER  = 12
         LEFT_HIP        = 23
@@ -142,12 +124,10 @@ def extract_pose_measurements(image_path):
             ((lm[LEFT_ANKLE].y + lm[RIGHT_ANKLE].y) / 2)
         ) + 1e-6
 
-        # Waist estimated as horizontal spread of elbows (proxy when no waist landmark)
         waist_est       = dist(LEFT_ELBOW, RIGHT_ELBOW)
         shoulder_hip_ratio  = shoulder_width / (hip_width + 1e-6)
         torso_height_ratio  = torso_length / body_height
 
-        # Clamp all to [0, 2] then divide by 2 → [0, 1]
         features = [
             min(shoulder_width, 2.0)  / 2.0,
             min(hip_width, 2.0)       / 2.0,
@@ -156,7 +136,7 @@ def extract_pose_measurements(image_path):
             min(shoulder_hip_ratio, 2.0) / 2.0,
             min(torso_height_ratio, 2.0) / 2.0,
         ]
-        return torch.tensor([features], dtype=torch.float32)  # shape [1, 6]
+        return torch.tensor([features], dtype=torch.float32)
 
     except ImportError:
         print("[WARN] mediapipe not installed. Pose measurements disabled.")
@@ -166,15 +146,12 @@ def extract_pose_measurements(image_path):
         return torch.zeros(1, 6)
 
 
-# ============================================================
 # MODEL ARCHITECTURE
-# Input: image features (2048) + stats (2) + pose (6) = 2056
-# ============================================================
 class BodyFatRegressor(nn.Module):
     def __init__(self, use_pose_features=True):
         super().__init__()
         extra_features = 6 if use_pose_features else 0
-        combined_size  = 2048 + 2 + extra_features  # 2056 or 2050
+        combined_size  = 2048 + 2 + extra_features
 
         base_model = resnet50(weights=None)
         self.features = nn.Sequential(
@@ -198,7 +175,7 @@ class BodyFatRegressor(nn.Module):
 
     def forward(self, img, stats, pose_feats=None):
         x = self.features(img)
-        x = x.view(x.size(0), -1)                     # [B, 2048]
+        x = x.view(x.size(0), -1)
         parts = [x, stats]
         if self.use_pose_features and pose_feats is not None:
             parts.append(pose_feats)
@@ -206,9 +183,7 @@ class BodyFatRegressor(nn.Module):
         return self.regressor(combined)
 
 
-# ============================================================
-# TRAINING TRANSFORMS — with augmentation
-# ============================================================
+# TRAINING TRANSFORMS
 def get_train_transforms():
     return transforms.Compose([
         transforms.Resize((256, 256)),
@@ -228,34 +203,12 @@ def get_inference_transforms():
     ])
 
 
-# ============================================================
-# PREDICTION FUNCTION — full improved pipeline
-# ============================================================
+# PREDICTION FUNCTION
 def predict_body_fat(front_path, side_path, height_cm, weight_kg,
                      model_path, norm_params_path, use_pose=False):
-    """
-    Full pipeline:
-      1. MediaPipe crop (remove background context)
-      2. rembg background removal (isolate body pixels)
-      3. Pose measurement extraction (body proportions)
-      4. ResNet50 + regressor inference
-      5. Average front + side predictions
 
-    Args:
-        front_path      : path to front-view image
-        side_path       : path to side-view image
-        height_cm       : person's height in cm
-        weight_kg       : person's weight in kg
-        model_path      : path to saved model .pt file
-        norm_params_path: path to normalization .npz file
-        use_pose        : whether to use pose measurement features
-
-    Returns:
-        (float, str): body fat percentage, category label
-    """
     device = torch.device("cpu")
 
-    # --- Load normalization params ---
     if not os.path.exists(norm_params_path):
         return 0.0, "Error: Missing Params File"
     try:
@@ -265,7 +218,6 @@ def predict_body_fat(front_path, side_path, height_cm, weight_kg,
     except Exception as e:
         return 0.0, f"Stats Error: {e}"
 
-    # --- Load model ---
     model = BodyFatRegressor(use_pose_features=use_pose)
     try:
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
@@ -281,39 +233,30 @@ def predict_body_fat(front_path, side_path, height_cm, weight_kg,
         """Full preprocessing: crop → bg remove → transform"""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Image missing: {path}")
-        # Step 1: Crop tightly to person
         cropped = crop_to_person(path)
-        # Step 2: Remove background
         clean   = remove_background(cropped)
-        # Step 3: Transform to tensor
         return transform(clean).unsqueeze(0).to(device)
 
     try:
-        # Prepare image tensors
         front_tensor = prepare_input(front_path)
         side_tensor  = prepare_input(side_path)
 
-        # Physical stats (normalized)
         stats = torch.tensor(
             [[height_cm / 250.0, weight_kg / 200.0]],
             dtype=torch.float32
         ).to(device)
 
-        # Pose measurements
         pose_front = extract_pose_measurements(front_path).to(device) if use_pose else None
         pose_side  = extract_pose_measurements(side_path).to(device)  if use_pose else None
 
-        # Inference
         with torch.no_grad():
             res_f_norm = model(front_tensor, stats, pose_front).item()
             res_s_norm = model(side_tensor,  stats, pose_side).item()
 
-        # Denormalize
         bf_front = (res_f_norm * t_std) + t_mean
         bf_side  = (res_s_norm * t_std) + t_mean
         final_bf = (bf_front + bf_side) / 2
 
-        # Sanity clamp + category
         if final_bf < 4.0:
             final_bf, cat = 4.0, "Error / Very Lean"
         elif final_bf > 60.0:
