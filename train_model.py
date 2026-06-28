@@ -14,13 +14,16 @@ from torch import nn, optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torchvision.models import resnet50, ResNet50_Weights
+from sklearn.model_selection import train_test_split
 
 if not hasattr(inspect, 'getargspec'):
     ArgSpec = collections.namedtuple('ArgSpec', ['args', 'varargs', 'keywords', 'defaults'])
 
+
     def getargspec(func):
         spec = inspect.getfullargspec(func)
         return ArgSpec(spec.args, spec.varargs, spec.varkw, spec.defaults)
+
 
     inspect.getargspec = getargspec
     inspect.ArgSpec = ArgSpec
@@ -33,8 +36,6 @@ np.object = object
 np.unicode = str
 np.str = str
 
-#1: REALISTIC DATA GENERATION
-
 MALE_MODEL_FILE = r'C:\Users\mihne\OneDrive\Desktop\sarpili\IOT\models\SMPL_MALE.pkl'
 OUTPUT_DIR = r'C:\Users\mihne\OneDrive\Desktop\sarpili\IOT\synthetic_dataset_v2'
 NUM_SAMPLES = 3000
@@ -43,9 +44,11 @@ os.makedirs(os.path.join(OUTPUT_DIR, 'images'), exist_ok=True)
 
 model = smplx.create(MALE_MODEL_FILE, model_type='smpl', gender='male', num_betas=10)
 
+
 def get_mesh_volume(vertices, faces):
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
     return abs(mesh.volume)
+
 
 def render_realistic_body(vertices, faces, angle=0):
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
@@ -127,6 +130,7 @@ def render_realistic_body(vertices, faces, angle=0):
 
     return img
 
+
 def generate_realistic_dataset():
     data_log = []
     print(f"Generating {NUM_SAMPLES} REALISTIC synthetic bodies...")
@@ -170,7 +174,7 @@ def generate_realistic_dataset():
     df = pd.DataFrame(data_log)
     df.to_csv(os.path.join(OUTPUT_DIR, 'realistic_labels.csv'), index=False)
 
-    print(f"\n✅ Dataset generated: {OUTPUT_DIR}")
+    print(f"\n Dataset generated: {OUTPUT_DIR}")
     print(f"Body Fat % Stats:")
     print(f"  Mean: {df['bf'].mean():.2f}%")
     print(f"  Std:  {df['bf'].std():.2f}%")
@@ -178,7 +182,6 @@ def generate_realistic_dataset():
 
     return df
 
-# PART 2: TRAINING ON REALISTIC DATA
 
 class BodyFatRegressor(nn.Module):
     def __init__(self, pretrained=True):
@@ -209,16 +212,13 @@ class BodyFatRegressor(nn.Module):
 
 
 class RealisticBodyFatDataset(Dataset):
-    def __init__(self, csv_file, img_dir, transform=None):
-        self.data = pd.read_csv(csv_file)
+    def __init__(self, dataframe, img_dir, transform=None, target_mean=None, target_std=None):
+        self.data = dataframe.reset_index(drop=True)
         self.img_dir = img_dir
         self.transform = transform
 
-        self.target_mean = self.data['bf'].mean()
-        self.target_std = self.data['bf'].std()
-
-        print(f"Dataset: {len(self.data)} samples")
-        print(f"BF% - Mean: {self.target_mean:.2f}%, Std: {self.target_std:.2f}%")
+        self.target_mean = target_mean if target_mean is not None else self.data['bf'].mean()
+        self.target_std = target_std if target_std is not None else self.data['bf'].std()
 
     def __len__(self):
         return len(self.data)
@@ -231,8 +231,7 @@ class RealisticBodyFatDataset(Dataset):
         if self.transform:
             image = self.transform(image)
 
-        stats = torch.tensor([row['height'] / 250.0, row['weight'] / 200.0],
-                             dtype=torch.float32)
+        stats = torch.tensor([row['height'] / 250.0, row['weight'] / 200.0], dtype=torch.float32)
         target_norm = (row['bf'] - self.target_mean) / self.target_std
 
         return image, stats, torch.tensor([target_norm], dtype=torch.float32)
@@ -248,6 +247,11 @@ def train_on_realistic_data():
     output_dir = os.path.join(OUTPUT_DIR, "model_outputs")
     os.makedirs(output_dir, exist_ok=True)
 
+    full_df = pd.read_csv(csv_file)
+    train_df, val_df = train_test_split(full_df, test_size=0.2, random_state=42)
+
+    print(f"Dataset Split: {len(train_df)} Training | {len(val_df)} Validation")
+
     train_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.RandomHorizontalFlip(p=0.5),
@@ -257,31 +261,41 @@ def train_on_realistic_data():
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-    dataset = RealisticBodyFatDataset(csv_file, OUTPUT_DIR, transform=train_transform)
+    val_transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    train_dataset = RealisticBodyFatDataset(train_df, OUTPUT_DIR, transform=train_transform)
+
+    val_dataset = RealisticBodyFatDataset(
+        val_df, OUTPUT_DIR, transform=val_transform,
+        target_mean=train_dataset.target_mean, target_std=train_dataset.target_std
+    )
 
     np.savez(os.path.join(output_dir, "bodyfat_norm_params.npz"),
-             mean=dataset.target_mean, std=dataset.target_std)
+             mean=train_dataset.target_mean, std=train_dataset.target_std)
 
-    loader = DataLoader(dataset, batch_size=32, shuffle=True,
-                        num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=0, pin_memory=True)
 
     model = BodyFatRegressor(pretrained=True).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
     criterion = nn.SmoothL1Loss()
 
-    print("Starting training for 50 epochs")
-    best_loss = float('inf')
+    print("\nStarting training for 50 epochs")
+    best_val_loss = float('inf')
 
     for epoch in range(50):
+
         model.train()
-        total_loss = 0
-        pbar = tqdm(loader, desc=f"Epoch {epoch + 1}/50")
+        total_train_loss = 0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/50 [Train]")
 
         for imgs, stats, targets in pbar:
-            imgs = imgs.to(device)
-            stats = stats.to(device)
-            targets = targets.to(device)
+            imgs, stats, targets = imgs.to(device), stats.to(device), targets.to(device)
 
             optimizer.zero_grad()
             outputs = model(imgs, stats)
@@ -291,31 +305,40 @@ def train_on_realistic_data():
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            total_loss += loss.item()
-            pbar.set_postfix(loss=f"{loss.item():.4f}",
-                             lr=f"{optimizer.param_groups[0]['lr']:.6f}")
+            total_train_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{optimizer.param_groups[0]['lr']:.6f}")
 
-        avg_loss = total_loss / len(loader)
+        avg_train_loss = total_train_loss / len(train_loader)
+
+        model.eval()
+        total_val_loss = 0
+        with torch.no_grad():
+            for imgs, stats, targets in val_loader:
+                imgs, stats, targets = imgs.to(device), stats.to(device), targets.to(device)
+                outputs = model(imgs, stats)
+                loss = criterion(outputs, targets)
+                total_val_loss += loss.item()
+
+        avg_val_loss = total_val_loss / len(val_loader)
+
         scheduler.step()
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            torch.save(model.state_dict(),
-                       os.path.join(output_dir, "bodyfat_model_BEST.pth"))
-            print(f" New best model saved! Loss: {best_loss:.4f}")
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), os.path.join(output_dir, "bodyfat_model_BEST.pth"))
+            print(f"  -> New best model saved! Val Loss: {best_val_loss:.4f} (Train Loss: {avg_train_loss:.4f})")
 
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch + 1}: Loss={avg_loss:.4f}, Best={best_loss:.4f}")
+            print(
+                f"Epoch {epoch + 1} Summary: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}, Best Val={best_val_loss:.4f}")
 
-    torch.save(model.state_dict(),
-               os.path.join(output_dir, "bodyfat_model_final.pth"))
+    torch.save(model.state_dict(), os.path.join(output_dir, "bodyfat_model_final.pth"))
 
     print(f"\n{'=' * 60}")
     print(f" Training complete!")
-    print(f"Best model: {output_dir}/bodyfat_model_BEST.pth")
+    print(f"Best model based on unseen data: {output_dir}\\bodyfat_model_BEST.pth")
     print(f"{'=' * 60}\n")
 
-# MAIN EXECUTION
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -345,5 +368,5 @@ if __name__ == "__main__":
     print("PIPELINE COMPLETE!")
     print("=" * 60)
     print(f"\nNew model location:")
-    print(f"  {OUTPUT_DIR}/model_outputs/bodyfat_model_BEST.pth")
+    print(f"  {OUTPUT_DIR}\\model_outputs\\bodyfat_model_BEST.pth")
     print(f"  model_path = r'{OUTPUT_DIR}\\model_outputs\\bodyfat_model_BEST.pth'")
