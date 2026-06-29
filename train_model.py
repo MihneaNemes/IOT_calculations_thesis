@@ -161,7 +161,7 @@ def generate_realistic_dataset():
     df = pd.DataFrame(data_log)
     df.to_csv(os.path.join(OUTPUT_DIR, 'realistic_labels.csv'), index=False)
 
-    print(f"\n✅ Dataset generated: {OUTPUT_DIR}")
+    print(f"\n Dataset generated: {OUTPUT_DIR}")
     print(f"Body Fat % Stats:")
     print(f"  Mean: {df['bf'].mean():.2f}%")
     print(f"  Std:  {df['bf'].std():.2f}%")
@@ -170,11 +170,7 @@ def generate_realistic_dataset():
     return df
 
 class BodyFatRegressor(nn.Module):
-    """
-    Two independent ResNet-50 encoders (front + side) whose 2048-dim feature
-    vectors are concatenated, then fused with height/weight stats before the
-    regression head.  Total feature dim fed to the regressor: 2048*2 + 2 = 4098.
-    """
+    
     def __init__(self, pretrained=True):
         super().__init__()
         weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
