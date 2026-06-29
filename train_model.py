@@ -19,11 +19,9 @@ from sklearn.model_selection import train_test_split
 if not hasattr(inspect, 'getargspec'):
     ArgSpec = collections.namedtuple('ArgSpec', ['args', 'varargs', 'keywords', 'defaults'])
 
-
     def getargspec(func):
         spec = inspect.getfullargspec(func)
         return ArgSpec(spec.args, spec.varargs, spec.varkw, spec.defaults)
-
 
     inspect.getargspec = getargspec
     inspect.ArgSpec = ArgSpec
@@ -95,19 +93,13 @@ def render_realistic_body(vertices, faces, angle=0):
     scene.add(camera, pose=cam_pose)
 
     main_intensity = np.random.uniform(2.5, 4.0)
-    main_light = pyrender.DirectionalLight(
-        color=[1.0, 0.98, 0.95],
-        intensity=main_intensity
-    )
+    main_light = pyrender.DirectionalLight(color=[1.0, 0.98, 0.95], intensity=main_intensity)
     scene.add(main_light, pose=cam_pose)
 
     if np.random.rand() > 0.3:
         fill_pose = cam_pose.copy()
         fill_pose[:3, 3] = [1.5, 0.5, 2.0]
-        fill_light = pyrender.DirectionalLight(
-            color=[0.95, 0.97, 1.0],
-            intensity=main_intensity * 0.4
-        )
+        fill_light = pyrender.DirectionalLight(color=[0.95, 0.97, 1.0], intensity=main_intensity * 0.4)
         scene.add(fill_light, pose=fill_pose)
 
     r = pyrender.OffscreenRenderer(224, 224)
@@ -115,16 +107,12 @@ def render_realistic_body(vertices, faces, angle=0):
     img = Image.fromarray(color)
 
     augmentations = np.random.rand()
-
     if augmentations > 0.3:
         img = ImageEnhance.Brightness(img).enhance(np.random.uniform(0.85, 1.15))
-
     if augmentations > 0.4:
         img = ImageEnhance.Contrast(img).enhance(np.random.uniform(0.9, 1.1))
-
     if augmentations > 0.6:
         img = img.filter(ImageFilter.GaussianBlur(radius=np.random.uniform(0, 0.8)))
-
     if augmentations > 0.7:
         img = ImageEnhance.Color(img).enhance(np.random.uniform(0.95, 1.05))
 
@@ -146,7 +134,6 @@ def generate_realistic_dataset():
             beta_scale = np.random.uniform(2.8, 4.5)
 
         betas = torch.randn([1, 10]) * beta_scale
-
         output = model(betas=betas, return_verts=True)
         verts = output.vertices.detach().cpu().numpy().squeeze()
         faces = model.faces
@@ -174,7 +161,7 @@ def generate_realistic_dataset():
     df = pd.DataFrame(data_log)
     df.to_csv(os.path.join(OUTPUT_DIR, 'realistic_labels.csv'), index=False)
 
-    print(f"\n Dataset generated: {OUTPUT_DIR}")
+    print(f"\n✅ Dataset generated: {OUTPUT_DIR}")
     print(f"Body Fat % Stats:")
     print(f"  Mean: {df['bf'].mean():.2f}%")
     print(f"  Std:  {df['bf'].std():.2f}%")
@@ -182,16 +169,28 @@ def generate_realistic_dataset():
 
     return df
 
-
 class BodyFatRegressor(nn.Module):
+    """
+    Two independent ResNet-50 encoders (front + side) whose 2048-dim feature
+    vectors are concatenated, then fused with height/weight stats before the
+    regression head.  Total feature dim fed to the regressor: 2048*2 + 2 = 4098.
+    """
     def __init__(self, pretrained=True):
         super().__init__()
-        base_model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1 if pretrained else None)
-        self.features = nn.Sequential(*list(base_model.children())[:-2],
-                                      nn.AdaptiveAvgPool2d((1, 1)))
+        weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
+
+        def make_encoder():
+            base = resnet50(weights=weights)
+            return nn.Sequential(
+                *list(base.children())[:-2],
+                nn.AdaptiveAvgPool2d((1, 1))
+            )
+
+        self.front_encoder = make_encoder()
+        self.side_encoder  = make_encoder()
 
         self.regressor = nn.Sequential(
-            nn.Linear(2048 + 2, 1024),
+            nn.Linear(2048 * 2 + 2, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(),
             nn.Dropout(0.4),
@@ -204,38 +203,37 @@ class BodyFatRegressor(nn.Module):
             nn.Linear(128, 1)
         )
 
-    def forward(self, img, stats):
-        x = self.features(img)
-        x = x.view(x.size(0), -1)
-        combined = torch.cat((x, stats), dim=1)
+    def forward(self, front_img, side_img, stats):
+        f = self.front_encoder(front_img).view(front_img.size(0), -1)   # (B, 2048)
+        s = self.side_encoder(side_img).view(side_img.size(0), -1)      # (B, 2048)
+        combined = torch.cat([f, s, stats], dim=1)                      # (B, 4098)
         return self.regressor(combined)
-
 
 class RealisticBodyFatDataset(Dataset):
     def __init__(self, dataframe, img_dir, transform=None, target_mean=None, target_std=None):
         self.data = dataframe.reset_index(drop=True)
         self.img_dir = img_dir
         self.transform = transform
-
         self.target_mean = target_mean if target_mean is not None else self.data['bf'].mean()
-        self.target_std = target_std if target_std is not None else self.data['bf'].std()
+        self.target_std  = target_std  if target_std  is not None else self.data['bf'].std()
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
-        img_path = os.path.join(self.img_dir, 'images', row['front'])
-        image = Image.open(img_path).convert('RGB')
+
+        front_img = Image.open(os.path.join(self.img_dir, 'images', row['front'])).convert('RGB')
+        side_img  = Image.open(os.path.join(self.img_dir, 'images', row['side'])).convert('RGB')
 
         if self.transform:
-            image = self.transform(image)
+            front_img = self.transform(front_img)
+            side_img  = self.transform(side_img)
 
         stats = torch.tensor([row['height'] / 250.0, row['weight'] / 200.0], dtype=torch.float32)
         target_norm = (row['bf'] - self.target_mean) / self.target_std
 
-        return image, stats, torch.tensor([target_norm], dtype=torch.float32)
-
+        return front_img, side_img, stats, torch.tensor([target_norm], dtype=torch.float32)
 
 def train_on_realistic_data():
     device = torch_directml.device()
@@ -243,13 +241,12 @@ def train_on_realistic_data():
     print(f"Training on AMD GPU: {device}")
     print(f"{'=' * 60}\n")
 
-    csv_file = os.path.join(OUTPUT_DIR, "realistic_labels.csv")
+    csv_file   = os.path.join(OUTPUT_DIR, "realistic_labels.csv")
     output_dir = os.path.join(OUTPUT_DIR, "model_outputs")
     os.makedirs(output_dir, exist_ok=True)
 
     full_df = pd.read_csv(csv_file)
     train_df, val_df = train_test_split(full_df, test_size=0.2, random_state=42)
-
     print(f"Dataset Split: {len(train_df)} Training | {len(val_df)} Validation")
 
     train_transform = transforms.Compose([
@@ -268,8 +265,7 @@ def train_on_realistic_data():
     ])
 
     train_dataset = RealisticBodyFatDataset(train_df, OUTPUT_DIR, transform=train_transform)
-
-    val_dataset = RealisticBodyFatDataset(
+    val_dataset   = RealisticBodyFatDataset(
         val_df, OUTPUT_DIR, transform=val_transform,
         target_mean=train_dataset.target_mean, target_std=train_dataset.target_std
     )
@@ -277,30 +273,32 @@ def train_on_realistic_data():
     np.savez(os.path.join(output_dir, "bodyfat_norm_params.npz"),
              mean=train_dataset.target_mean, std=train_dataset.target_std)
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True,  num_workers=0, pin_memory=True)
+    val_loader   = DataLoader(val_dataset,   batch_size=32, shuffle=False, num_workers=0, pin_memory=True)
 
-    model = BodyFatRegressor(pretrained=True).to(device)
+    model     = BodyFatRegressor(pretrained=True).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
     criterion = nn.SmoothL1Loss()
 
-    print("\nStarting training for 50 epochs")
+    print("\nStarting training for 50 epochs (dual-view: front + side)")
     best_val_loss = float('inf')
 
     for epoch in range(50):
-
+        # ── train ──
         model.train()
         total_train_loss = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/50 [Train]")
 
-        for imgs, stats, targets in pbar:
-            imgs, stats, targets = imgs.to(device), stats.to(device), targets.to(device)
+        for front_imgs, side_imgs, stats, targets in pbar:
+            front_imgs = front_imgs.to(device)
+            side_imgs  = side_imgs.to(device)
+            stats      = stats.to(device)
+            targets    = targets.to(device)
 
             optimizer.zero_grad()
-            outputs = model(imgs, stats)
+            outputs = model(front_imgs, side_imgs, stats)
             loss = criterion(outputs, targets)
-
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -313,14 +311,17 @@ def train_on_realistic_data():
         model.eval()
         total_val_loss = 0
         with torch.no_grad():
-            for imgs, stats, targets in val_loader:
-                imgs, stats, targets = imgs.to(device), stats.to(device), targets.to(device)
-                outputs = model(imgs, stats)
+            for front_imgs, side_imgs, stats, targets in val_loader:
+                front_imgs = front_imgs.to(device)
+                side_imgs  = side_imgs.to(device)
+                stats      = stats.to(device)
+                targets    = targets.to(device)
+
+                outputs = model(front_imgs, side_imgs, stats)
                 loss = criterion(outputs, targets)
                 total_val_loss += loss.item()
 
         avg_val_loss = total_val_loss / len(val_loader)
-
         scheduler.step()
 
         if avg_val_loss < best_val_loss:
@@ -329,25 +330,26 @@ def train_on_realistic_data():
             print(f"  -> New best model saved! Val Loss: {best_val_loss:.4f} (Train Loss: {avg_train_loss:.4f})")
 
         if (epoch + 1) % 10 == 0:
-            print(
-                f"Epoch {epoch + 1} Summary: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}, Best Val={best_val_loss:.4f}")
+            print(f"Epoch {epoch + 1} Summary: Train Loss={avg_train_loss:.4f}, "
+                  f"Val Loss={avg_val_loss:.4f}, Best Val={best_val_loss:.4f}")
 
     torch.save(model.state_dict(), os.path.join(output_dir, "bodyfat_model_final.pth"))
 
     print(f"\n{'=' * 60}")
     print(f" Training complete!")
-    print(f"Best model based on unseen data: {output_dir}\\bodyfat_model_BEST.pth")
+    print(f"Best model: {output_dir}\\bodyfat_model_BEST.pth")
     print(f"{'=' * 60}\n")
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("COMPLETE RETRAINING PIPELINE")
+    print("COMPLETE RETRAINING PIPELINE  (dual-view: front + side)")
     print("=" * 60)
     print("\nThis will:")
-    print("Generate 3000 realistic synthetic bodies")
+    print("  1. Generate 3000 realistic synthetic bodies (front + side views)")
+    print("  2. Train a dual-encoder ResNet-50 on both views")
 
-    response = input("Continue? (y/n): ")
+    response = input("\nContinue? (y/n): ")
     if response.lower() != 'y':
         print("Cancelled.")
         exit()
@@ -355,13 +357,11 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("STEP 1: Generating Realistic Synthetic Dataset")
     print("=" * 60 + "\n")
-
     df = generate_realistic_dataset()
 
     print("\n" + "=" * 60)
-    print("STEP 2: Training Model on Realistic Data")
+    print("STEP 2: Training Dual-View Model")
     print("=" * 60 + "\n")
-
     train_on_realistic_data()
 
     print("\n" + "=" * 60)
@@ -369,4 +369,3 @@ if __name__ == "__main__":
     print("=" * 60)
     print(f"\nNew model location:")
     print(f"  {OUTPUT_DIR}\\model_outputs\\bodyfat_model_BEST.pth")
-    print(f"  model_path = r'{OUTPUT_DIR}\\model_outputs\\bodyfat_model_BEST.pth'")
