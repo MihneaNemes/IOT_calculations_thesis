@@ -14,14 +14,7 @@ except ImportError:
     sys.modules['numpy._core'] = np.core
     sys.modules['numpy._core.multiarray'] = np.core.multiarray
 
-
-# STEP 1: MEDIAPIPE CROP
 def crop_to_person(image_path, padding=30):
-    """
-    Uses MediaPipe Pose to detect body landmarks and crop tightly
-    around the person, removing background clutter.
-    Falls back to the original image if detection fails.
-    """
     try:
         import mediapipe as mp
         img_bgr = cv2.imread(image_path)
@@ -52,21 +45,12 @@ def crop_to_person(image_path, padding=30):
 
     except ImportError:
         print("[WARN] mediapipe not installed. pip install mediapipe. Using full image.")
-        img = Image.open(image_path).convert("RGB")
-        return img
+        return Image.open(image_path).convert("RGB")
     except Exception as e:
         print(f"[WARN] Crop failed ({e}), using full image.")
-        img = Image.open(image_path).convert("RGB")
-        return img
+        return Image.open(image_path).convert("RGB")
 
-
-# STEP 2: BACKGROUND REMOVAL
 def remove_background(pil_image):
-    """
-    Uses rembg to strip the background, leaving only the person.
-    Returns an RGB PIL image with background replaced by white.
-    Falls back to original image if rembg is not available.
-    """
     try:
         from rembg import remove
         result_rgba = remove(pil_image)
@@ -80,10 +64,7 @@ def remove_background(pil_image):
         print(f"[WARN] BG removal failed ({e}), skipping.")
         return pil_image.convert("RGB")
 
-
-# STEP 3: POSE MEASUREMENTS
 def extract_pose_measurements(image_path):
-
     try:
         import mediapipe as mp
         img_bgr = cv2.imread(image_path)
@@ -97,44 +78,43 @@ def extract_pose_measurements(image_path):
             results = pose.process(img_rgb)
 
         if not results.pose_landmarks:
-            return torch.zeros(6)
+            return torch.zeros(1, 6)
 
         lm = results.pose_landmarks.landmark
 
-        LEFT_SHOULDER   = 11
-        RIGHT_SHOULDER  = 12
-        LEFT_HIP        = 23
-        RIGHT_HIP       = 24
-        LEFT_EAR        = 7
-        RIGHT_EAR       = 8
-        LEFT_ANKLE      = 27
-        RIGHT_ANKLE     = 28
-        LEFT_ELBOW      = 13
-        RIGHT_ELBOW     = 14
+        LEFT_SHOULDER  = 11
+        RIGHT_SHOULDER = 12
+        LEFT_HIP       = 23
+        RIGHT_HIP      = 24
+        LEFT_EAR       = 7
+        RIGHT_EAR      = 8
+        LEFT_ANKLE     = 27
+        RIGHT_ANKLE    = 28
+        LEFT_ELBOW     = 13
+        RIGHT_ELBOW    = 14
 
         def dist(a, b):
             return ((lm[a].x - lm[b].x)**2 + (lm[a].y - lm[b].y)**2) ** 0.5
 
-        shoulder_width  = dist(LEFT_SHOULDER, RIGHT_SHOULDER)
-        hip_width       = dist(LEFT_HIP, RIGHT_HIP)
-        torso_length    = (abs(lm[LEFT_SHOULDER].y - lm[LEFT_HIP].y) +
-                           abs(lm[RIGHT_SHOULDER].y - lm[RIGHT_HIP].y)) / 2
-        body_height     = abs(
+        shoulder_width     = dist(LEFT_SHOULDER, RIGHT_SHOULDER)
+        hip_width          = dist(LEFT_HIP, RIGHT_HIP)
+        torso_length       = (abs(lm[LEFT_SHOULDER].y - lm[LEFT_HIP].y) +
+                               abs(lm[RIGHT_SHOULDER].y - lm[RIGHT_HIP].y)) / 2
+        body_height        = abs(
             ((lm[LEFT_EAR].y + lm[RIGHT_EAR].y) / 2) -
             ((lm[LEFT_ANKLE].y + lm[RIGHT_ANKLE].y) / 2)
         ) + 1e-6
-
-        waist_est       = dist(LEFT_ELBOW, RIGHT_ELBOW)
-        shoulder_hip_ratio  = shoulder_width / (hip_width + 1e-6)
-        torso_height_ratio  = torso_length / body_height
+        waist_est          = dist(LEFT_ELBOW, RIGHT_ELBOW)
+        shoulder_hip_ratio = shoulder_width / (hip_width + 1e-6)
+        torso_height_ratio = torso_length / body_height
 
         features = [
-            min(shoulder_width, 2.0)  / 2.0,
-            min(hip_width, 2.0)       / 2.0,
-            min(torso_length, 2.0)    / 2.0,
-            min(waist_est, 2.0)       / 2.0,
-            min(shoulder_hip_ratio, 2.0) / 2.0,
-            min(torso_height_ratio, 2.0) / 2.0,
+            min(shoulder_width, 2.0)       / 2.0,
+            min(hip_width, 2.0)            / 2.0,
+            min(torso_length, 2.0)         / 2.0,
+            min(waist_est, 2.0)            / 2.0,
+            min(shoulder_hip_ratio, 2.0)   / 2.0,
+            min(torso_height_ratio, 2.0)   / 2.0,
         ]
         return torch.tensor([features], dtype=torch.float32)
 
@@ -145,21 +125,26 @@ def extract_pose_measurements(image_path):
         print(f"[WARN] Pose measurement failed ({e}), using zeros.")
         return torch.zeros(1, 6)
 
-
-# MODEL ARCHITECTURE
 class BodyFatRegressor(nn.Module):
-    def __init__(self, use_pose_features=True):
+    """
+    Dual-encoder model: separate ResNet-50 branches for front and side images.
+    Feature dim: 2048 (front) + 2048 (side) + 2 (stats) = 4098
+    """
+    def __init__(self):
         super().__init__()
-        extra_features = 6 if use_pose_features else 0
-        combined_size  = 2048 + 2 + extra_features
 
-        base_model = resnet50(weights=None)
-        self.features = nn.Sequential(
-            *list(base_model.children())[:-2],
-            nn.AdaptiveAvgPool2d((1, 1))
-        )
+        def make_encoder():
+            base = resnet50(weights=None)
+            return nn.Sequential(
+                *list(base.children())[:-2],
+                nn.AdaptiveAvgPool2d((1, 1))
+            )
+
+        self.front_encoder = make_encoder()
+        self.side_encoder  = make_encoder()
+
         self.regressor = nn.Sequential(
-            nn.Linear(combined_size, 1024),
+            nn.Linear(2048 * 2 + 2, 1024),
             nn.BatchNorm1d(1024),
             nn.ReLU(),
             nn.Dropout(0.4),
@@ -171,29 +156,12 @@ class BodyFatRegressor(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 1)
         )
-        self.use_pose_features = use_pose_features
 
-    def forward(self, img, stats, pose_feats=None):
-        x = self.features(img)
-        x = x.view(x.size(0), -1)
-        parts = [x, stats]
-        if self.use_pose_features and pose_feats is not None:
-            parts.append(pose_feats)
-        combined = torch.cat(parts, dim=1)
+    def forward(self, front_img, side_img, stats):
+        f = self.front_encoder(front_img).view(front_img.size(0), -1)  # (B, 2048)
+        s = self.side_encoder(side_img).view(side_img.size(0), -1)     # (B, 2048)
+        combined = torch.cat([f, s, stats], dim=1)                     # (B, 4098)
         return self.regressor(combined)
-
-
-# TRAINING TRANSFORMS
-def get_train_transforms():
-    return transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.RandomCrop(224),
-        transforms.RandomHorizontalFlip(),
-        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
-        transforms.RandomAffine(degrees=5, translate=(0.05, 0.05)),
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    ])
 
 def get_inference_transforms():
     return transforms.Compose([
@@ -202,23 +170,21 @@ def get_inference_transforms():
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
-
-# PREDICTION FUNCTION
 def predict_body_fat(front_path, side_path, height_cm, weight_kg,
-                     model_path, norm_params_path, use_pose=False):
+                     model_path, norm_params_path):
 
     device = torch.device("cpu")
 
     if not os.path.exists(norm_params_path):
         return 0.0, "Error: Missing Params File"
     try:
-        params  = np.load(norm_params_path)
-        t_mean  = float(params['mean'])
-        t_std   = float(params['std'])
+        params = np.load(norm_params_path)
+        t_mean = float(params['mean'])
+        t_std  = float(params['std'])
     except Exception as e:
         return 0.0, f"Stats Error: {e}"
 
-    model = BodyFatRegressor(use_pose_features=use_pose)
+    model = BodyFatRegressor()
     try:
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint)
@@ -230,7 +196,6 @@ def predict_body_fat(front_path, side_path, height_cm, weight_kg,
     transform = get_inference_transforms()
 
     def prepare_input(path):
-        """Full preprocessing: crop → bg remove → transform"""
         if not os.path.exists(path):
             raise FileNotFoundError(f"Image missing: {path}")
         cropped = crop_to_person(path)
@@ -246,16 +211,10 @@ def predict_body_fat(front_path, side_path, height_cm, weight_kg,
             dtype=torch.float32
         ).to(device)
 
-        pose_front = extract_pose_measurements(front_path).to(device) if use_pose else None
-        pose_side  = extract_pose_measurements(side_path).to(device)  if use_pose else None
-
         with torch.no_grad():
-            res_f_norm = model(front_tensor, stats, pose_front).item()
-            res_s_norm = model(side_tensor,  stats, pose_side).item()
+            pred_norm = model(front_tensor, side_tensor, stats).item()
 
-        bf_front = (res_f_norm * t_std) + t_mean
-        bf_side  = (res_s_norm * t_std) + t_mean
-        final_bf = (bf_front + bf_side) / 2
+        final_bf = (pred_norm * t_std) + t_mean
 
         if final_bf < 4.0:
             final_bf, cat = 4.0, "Error / Very Lean"
